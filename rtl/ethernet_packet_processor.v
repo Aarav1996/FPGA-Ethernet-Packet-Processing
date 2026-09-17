@@ -1,75 +1,205 @@
-module packet_parser (
-    input  wire        clk,
-    input  wire        rst_n,
+module ethernet_packet_processor #(
+    parameter [47:0] LOCAL_MAC = 48'h00_11_22_33_44_55
+)(
+    input  wire       clk,
+    input  wire       rst_n,
 
-    input  wire [7:0]  rx_data,
-    input  wire        rx_valid,
-    input  wire        rx_last,
+    // Ethernet RX
+    input  wire [7:0] rx_data,
+    input  wire       rx_valid,
+    input  wire       rx_last,
 
-    output reg  [47:0] dest_mac,
-    output reg  [47:0] src_mac,
-    output reg  [15:0] ethertype,
+    // Ethernet TX
+    output reg  [7:0] tx_data,
+    output reg        tx_valid,
+    output reg        tx_last,
 
-    output reg         header_valid
+    // Status
+    output wire [47:0] destination_mac,
+    output wire [47:0] source_mac,
+    output wire [15:0] packet_ethertype,
+    output wire        packet_accepted
 );
 
-    reg [3:0] byte_count;
+    wire header_valid;
+
+    // ----------------------------------------
+    // Packet Parser
+    // ----------------------------------------
+
+    packet_parser parser_inst (
+
+        .clk(clk),
+        .rst_n(rst_n),
+
+        .rx_data(rx_data),
+        .rx_valid(rx_valid),
+        .rx_last(rx_last),
+
+        .dest_mac(destination_mac),
+        .src_mac(source_mac),
+        .ethertype(packet_ethertype),
+
+        .header_valid(header_valid)
+
+    );
+
+
+    // ----------------------------------------
+    // MAC Filter
+    // ----------------------------------------
+
+    packet_filter #(
+        .LOCAL_MAC(LOCAL_MAC)
+    )
+    filter_inst (
+
+        .clk(clk),
+        .rst_n(rst_n),
+
+        .dest_mac(destination_mac),
+        .header_valid(header_valid),
+
+        .packet_accept(packet_accepted)
+
+    );
+
+
+    // ----------------------------------------
+    // Packet Buffer
+    // ----------------------------------------
+
+    reg [7:0] packet_memory [0:2047];
+
+    reg [11:0] write_pointer;
+    reg [11:0] read_pointer;
+
+    reg [11:0] packet_length;
+
+    reg [1:0] state;
+
+    localparam IDLE     = 2'd0;
+    localparam RECEIVE  = 2'd1;
+    localparam TRANSMIT = 2'd2;
+
 
     always @(posedge clk or negedge rst_n) begin
 
         if (!rst_n) begin
 
-            byte_count  <= 4'd0;
-            dest_mac    <= 48'd0;
-            src_mac     <= 48'd0;
-            ethertype   <= 16'd0;
-            header_valid <= 1'b0;
+            state         <= IDLE;
+
+            write_pointer <= 12'd0;
+            read_pointer  <= 12'd0;
+
+            packet_length <= 12'd0;
+
+            tx_data       <= 8'd0;
+            tx_valid      <= 1'b0;
+            tx_last       <= 1'b0;
 
         end
 
         else begin
 
-            if (rx_valid) begin
+            case (state)
 
-                case (byte_count)
+                // --------------------------------
+                // IDLE
+                // --------------------------------
 
-                    // Destination MAC
-                    4'd0: dest_mac[47:40] <= rx_data;
-                    4'd1: dest_mac[39:32] <= rx_data;
-                    4'd2: dest_mac[31:24] <= rx_data;
-                    4'd3: dest_mac[23:16] <= rx_data;
-                    4'd4: dest_mac[15:8]  <= rx_data;
-                    4'd5: dest_mac[7:0]   <= rx_data;
+                IDLE: begin
 
-                    // Source MAC
-                    4'd6: src_mac[47:40] <= rx_data;
-                    4'd7: src_mac[39:32] <= rx_data;
-                    4'd8: src_mac[31:24] <= rx_data;
-                    4'd9: src_mac[23:16] <= rx_data;
-                    4'd10: src_mac[15:8] <= rx_data;
-                    4'd11: src_mac[7:0]  <= rx_data;
+                    tx_valid <= 1'b0;
+                    tx_last  <= 1'b0;
 
-                    // EtherType
-                    4'd12: ethertype[15:8] <= rx_data;
-                    4'd13: begin
-                        ethertype[7:0] <= rx_data;
-                        header_valid <= 1'b1;
+                    write_pointer <= 12'd0;
+                    read_pointer  <= 12'd0;
+
+                    if (rx_valid) begin
+
+                        packet_memory[0] <= rx_data;
+
+                        write_pointer <= 12'd1;
+
+                        state <= RECEIVE;
+
                     end
 
-                    default: begin
+                end
+
+
+                // --------------------------------
+                // RECEIVE
+                // --------------------------------
+
+                RECEIVE: begin
+
+                    if (rx_valid) begin
+
+                        packet_memory[write_pointer] <= rx_data;
+
+                        write_pointer <= write_pointer + 1'b1;
+
+                        if (rx_last) begin
+
+                            packet_length <= write_pointer + 1'b1;
+
+                            state <= TRANSMIT;
+
+                        end
+
                     end
 
-                endcase
-
-                if (rx_last) begin
-                    byte_count <= 4'd0;
-                    header_valid <= 1'b0;
-                end
-                else begin
-                    byte_count <= byte_count + 1'b1;
                 end
 
-            end
+
+                // --------------------------------
+                // TRANSMIT
+                // --------------------------------
+
+                TRANSMIT: begin
+
+                    if (packet_accepted) begin
+
+                        tx_valid <= 1'b1;
+
+                        tx_data <= packet_memory[read_pointer];
+
+                        if (read_pointer == packet_length - 1) begin
+
+                            tx_last <= 1'b1;
+
+                            state <= IDLE;
+
+                        end
+
+                        else begin
+
+                            tx_last <= 1'b0;
+
+                            read_pointer <= read_pointer + 1'b1;
+
+                        end
+
+                    end
+
+                    else begin
+
+                        tx_valid <= 1'b0;
+                        tx_last  <= 1'b0;
+
+                        state <= IDLE;
+
+                    end
+
+                end
+
+                default:
+                    state <= IDLE;
+
+            endcase
+
         end
 
     end
